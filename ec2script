@@ -1,0 +1,325 @@
+#!/usr/bin/env python
+# Launches an AWS EC2 instance and executes a script
+
+import boto.ec2 as ec2
+import boto.exception as exc
+import sys, os, json, time, datetime, optparse, string
+
+# dirty data seeking
+if os.path.dirname(__file__) == "/usr/local/bin":
+    INSTANCE_DATA = "/usr/share/ec2script/instance_data.json"
+else:
+    INSTANCE_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)),"instance_data.json")
+
+DEFAULT_CONFIG = os.path.expanduser("~/.ec2script")
+CONFIG_DEFS = {
+    "key":"AWS Access Key id",
+    "secret":"AWS Access Key secret",
+    "region":"AWS Region",
+    "instance_type":"Default instance type",
+    "image_id":"AMI ID or image ID",
+    "key_name":"RSA key pair name (optional)",
+    "security_groups":"Default EC2 security group names (optional, comma separate)",
+    "instance_profile_name":"IAM role to assign to instances (optional)",
+    "instance_initiated_shutdown_behavior":"Instance initiated shutdown behavior (halt/terminate)"
+}
+CONF_KEYS = ["key","secret","region","instance_type","image_id","key_name","security_groups","instance_profile_name","instance_initiated_shutdown_behavior"]
+DEFAULTS = {
+    "region":"us-east-1",
+    "instance_type":"t1.micro",
+    "instance_initiated_shutdown_behavior":"halt"
+    }
+
+ONDEMAND_OPTIONS = ["min_count","max_count","key_name","security_groups","user_data","instance_type","placement","kernel_id","ramdisk_id","monitoring_enabled","subnet_id","private_ip_address","block_device_map","disable_api_termination","instance_initiated_shutdown_behavior","placement_group","client_token","tenancy","instance_profile_arn","instance_profile_name","ebs_optimized","netwonk_interfaces","dry_run"]
+SPOT_OPTIONS = ["count","type","valid_from","valid_until","launch_group","availability_zone_group","key_name","security_groups","user_data","instance_type","placement","kernel_id","ramdisk_id","monitoring_enabled","subnet_id","placement_group","block_device_map","security_group_ids","instance_profile_arn","instance_profile_name","ebs_optimized","netwonk_interfaces","dry_run"]
+
+def _option_parser():
+
+    usage = "Usage: ec2script <path_to_script> [<options>]\n       ec2script --configure to configure \n       ec2script --spot-prices for spot prices\n       ec2script --help for help"
+
+    parser = optparse.OptionParser(usage)
+    parser.set_defaults(cfg=DEFAULT_CONFIG,
+                        noscript=False,
+                        configure=False,
+                        prices=False,
+    )
+
+    parser.add_option("--configure",action="store_true",dest="configure",
+                      help="Configure ec2script defaults and exit")
+    parser.add_option("--spot-prices",action="store_true",dest="prices",
+                      help="List current spot prices and exit")
+    parser.add_option("--instance-types",action="store_true",dest="ondemand",
+                      help="List instance CPU, memory, and on-demand prices and exit")
+    parser.add_option("-c","--config",dest="cfg",
+                      help="Config file to use [default: %default]")
+    parser.add_option("-N","--noscript",action="store_true",dest="noscript",
+                      help="Launch instance without an attached script.")
+
+    i_opts = optparse.OptionGroup(parser,"Instance Request Options")
+    i_opts.add_option("--spot",dest="max_price",type="float",
+                      help="Request spot instance with MAX_PRICE in dollars instead of an on demand instance.")
+    i_opts.add_option("-r","--region",dest="region",
+                      help="Region in which to run instance or list spot prices")
+    i_opts.add_option("-I","--image",dest="image_id",
+                      help="AMI image ID. See http://aws.amazon.com")
+    i_opts.add_option("-t","--instance-type",dest="instance_type",metavar="TYPE",
+                      help="Instance type. See http://aws.amazon.com")
+    i_opts.add_option("-k","--key-name",dest="key_name",
+                      help="RSA key to attach (e.g. for ssh-ing into the instance)")
+    i_opts.add_option("-g","--groups",dest="security_groups",
+                      help="Security group names as comma separated list")
+    i_opts.add_option("-z","--placement",dest="placement",metavar="ZONE",
+                      help="Availability Zone in which to launch instance")
+    i_opts.add_option("-S","--shutdown-behavior",dest="instance_initiated_shutdown_behavior", metavar="stop|terminate",
+                      help="Stop or terminate instance on instance-initiated shutdown")
+    i_opts.add_option("-v","--valid-until",dest="valid_until",metavar="TIME",
+                      help="End date of request as ISO8601 time string [default: now+1hr")
+    i_opts.add_option("-p","--profile",dest="instance_profile_name",metavar="NAME",
+                      help="Name of IAM role to assign to instance. Access credentials become available to the instance at <169.254.169.254/latest/meta-data/iam/security-credentials/<NAME>/>.")
+    i_opts.add_option("-d","--dry-run",dest="dry_run",action="store_true",
+                      help="Dry run. Don't actually launch instances")
+    parser.add_option_group(i_opts)
+
+    parser.set_description(
+        "ec2script is a simple utility for executing scripts on Amazon EC2 instances. It allows you to launch on demand or spot instances with an attached user data script which will execute on boot. Scripts should begin with a shebang, the two characters, #!, in order to execute on boot. Note that anyone with access to the EC2 instance will be able to read the content of the script.")
+    
+    return parser
+
+
+def launch_instances(r, k, s, ami, in_args):
+    """
+    Connects to region <r> with key <k> and secret <s>
+    Launches EC2 instance(s) with args <in_args>
+    See boto.ec2.connection.run_instances for arguments
+    """
+
+    c = ec2.connect_to_region(r,aws_access_key_id=k,aws_secret_access_key=s)
+    if in_args.has_key("security_groups"):
+        if type(in_args["security_groups"]) in [str, unicode]:
+            in_args["security_groups"] = in_args["security_groups"].split(",") 
+
+    res = c.run_instances(ami, **in_args)
+    try:
+        for i in res.instances:
+            sys.stderr.write("Launching instance %s" % i.id)
+        for i in res.instances:
+            while i.state != 'running':
+                sys.stderr.write(".")
+                i.update()
+                time.sleep(1)
+            print "\n%s : %s" % (i.id, i.ip_address)
+    except KeyboardInterrupt as e:
+        sys.stderr.write("\nInturrupted... \nCanceling instance requests...")  
+        t = c.terminate_instances([i.id for i in res.instances])
+        sys.stderr.write("\nTerminated: %s\n" % string.join([i.id for i in t],', '))
+    return res
+
+def launch_spot_instances(r, k, s, price, ami, in_args):
+    """
+    Connects to region <r> with key <k> and secret <s>
+    Requests EC2 spot instance(s) with args <in_args>
+    See boto.ec2.connection.request_spot_instances for arguments
+    """
+    c = ec2.connect_to_region(r,aws_access_key_id=k,aws_secret_access_key=s)
+    if in_args.has_key("security_groups"):
+        if type(in_args["security_groups"]) in [str, unicode]:
+            in_args["security_groups"] = in_args["security_groups"].split(",") 
+
+    if not "valid_until" in in_args:
+        t = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        in_args["valid_until"] = t.isoformat()
+    res = c.request_spot_instances(price, ami, **in_args)
+    try:
+        sys.stderr.write("Placing spot requests")
+        ids = [i.id for i in res]
+        msgs = {}
+        for i in ids:
+            msgs[i]=''
+        while any([i.state == "open" for i in res if i.id in msgs.keys()]):
+            res = c.get_all_spot_instance_requests(ids)
+            for i in res:
+                if msgs[i.id] != i.status.message:
+                    msgs[i.id] = i.status.message                
+                    sys.stderr.write("\n%s: %s\n" % (i.id, i.status.message))
+                else: 
+                    sys.stderr.write(".")
+            time.sleep(1)
+        res = c.get_only_instances([i.instance_id for i in res])
+        for i in res:
+            while i.state != 'running':
+                sys.stderr.write(".")
+                i.update()
+                time.sleep(1)
+            print "\n%s : %s" % (i.id, i.ip_address)
+    except KeyboardInterrupt as e:
+        sys.stderr.write("\nInturrupted... \nCanceling spot instance requests...") 
+        t = c.cancel_spot_instance_requests([i.id for i in res])
+        sys.stderr.write("\nTerminated: %s\n" % string.join([i.id for i in t],", "))
+
+    return res
+
+def list_prices(r, k, s, d=1):
+    print "Fetching spot prices for %s" % r
+    c = ec2.connect_to_region(r,aws_access_key_id=k,aws_secret_access_key=s)
+    t = datetime.datetime.utcnow() 
+    t2 = t - datetime.timedelta(days=d)
+    h = c.get_spot_price_history(start_time=t2.isoformat(),end_time=t.isoformat(),product_description="Linux/UNIX")
+    outstats = {}
+    
+    f = open(INSTANCE_DATA,'rb')
+    stats = json.load(f)
+    f.close()
+
+    for k in stats.keys():
+        p = sorted([x.price for x in h if x.instance_type==k])
+        if len(p)>0:
+            outstats[k]={}
+            outstats[k]["min"] = min(p)
+            outstats[k]["max"] = max(p)
+            outstats[k]["med"] = p[int(len(p)/2)]
+            n = sorted([(x.timestamp, x.price) for x in h if x.instance_type==k])
+            outstats[k]["now"] = n[-1][1]
+            outstats[k]["medc"] = outstats[k]["med"]/stats[k]["ecu"]
+            outstats[k]["medm"] = outstats[k]["med"]/stats[k]["mem"]
+    sortlist = sorted([k for k in outstats.keys()],key=lambda k: outstats[k]["medc"])
+    print "Hourly prices since %s" % t2.ctime()
+    print u"Type\t\t\u00A2/ECU \u00A2/MEM  mid$  Xmin  Xmax  now$ base$"
+    for k in sortlist:
+        print "%s\t%5.2f %5.2f %4.3f %4d%% %4d%% %4.3f %4.3f" % ( 
+            k,
+            outstats[k]["medc"]*100,
+            outstats[k]["medm"]*100,
+            outstats[k]["med"],
+            outstats[k]["min"]/outstats[k]["med"]*100,
+            outstats[k]["max"]/outstats[k]["med"]*100,
+            outstats[k]["now"],
+            stats[k]["pr"],
+        )
+    print "Base prices, CPU, and memory based us-east-1 on-demand Linux instances as of Dec 2013."
+    return h
+    
+def list_ondemand():
+    f = open(INSTANCE_DATA,'rb')
+    stats = json.load(f)
+    f.close()
+    sortlist = sorted([k for k in stats.keys()],key=lambda k: stats[k]["pr"])
+    print u"Type\t\tvCPUs ECUs mem(GB)  $/hr"
+    for k in sortlist:
+        print "%s\t%5d %4d %6d  %4.3f" % ( 
+            k,
+            stats[k]["cpu"],
+            stats[k]["ecu"],
+            stats[k]["mem"],
+            stats[k]["pr"])
+    print "Base prices, CPU, and memory based us-east-1 on-demand Linux instances as of Dec 2013. See most up to date prices at http://aws.amazon.com."
+
+def load_config(cf):
+    try:
+        f = open(cf,"rb")
+        conf = json.load(f)
+        f.close()
+    except:
+        print "Failed to load config. Running configuration utility."
+        configure(cf, {})
+    return conf
+
+def configure(cf, conf):
+    for k in CONF_KEYS:
+        if not conf.has_key(k):
+            if DEFAULTS.has_key(k):
+                conf[k]=DEFAULTS[k]
+            else:
+                conf[k]=""
+        r = raw_input("%s [%s]: " % (CONFIG_DEFS[k], conf[k]))
+        if r != "":
+            conf[k]=r
+    if test_connection(conf["region"],conf["key"],conf["secret"]):
+        try:
+            f = open(cf,"wb+")
+            json.dump(conf,f)
+            f.close()
+        except:
+            sys.stderr.write("Failed to save config file %s:" % cf)
+    else:
+        r = raw_input("\nReconfigure [Y/n]?")
+        if not r == "n":
+            configure(cf, conf)
+    sys.exit()
+
+def test_connection(r,k,s):
+    print "Testing connection..."
+    c = ec2.connect_to_region(r,aws_access_key_id=k,aws_secret_access_key=s) 
+    try:
+        c.describe_account_attributes()
+        print "Connection successful!"
+        return 1
+    except exc.EC2ResponseError as e:
+        print "Connection failed\n"
+        print e
+    return 0
+
+def set_script(f):
+    if f is not None:
+        if f[:2]=="#!":
+            return f
+        else:
+            try:
+                s = open(f,'rb')
+                return s.read()
+            except:
+                sys.stderr.write("Failed to read file %s" % f)
+                sys.exit()
+    return None
+
+def main(args):
+    p = _option_parser()
+    options, pargs =  p.parse_args(args[1:])
+
+    conf = load_config(options.cfg)
+    for o in vars(options):
+        v = getattr(options,o)
+        if v is not None:
+            conf[o]=v
+    conf["region"] = options.region or conf["region"]
+    
+    r,k,s = (conf["region"],conf["key"],conf["secret"])
+
+    if options.ondemand:
+        list_ondemand()
+        return
+    elif options.prices:
+        list_prices(r,k,s)
+        return
+    elif options.configure:
+        configure(options.cfg,conf)
+        return
+    elif len(pargs) != 1 and not options.noscript:
+        p.print_usage()
+        return
+
+    in_args = {}
+        
+    if len(pargs):
+        conf["user_data"] = set_script(pargs[0])
+    
+    ami = conf["image_id"]
+
+    if options.max_price:
+        for i in SPOT_OPTIONS:
+            if i in conf and conf[i] is not None:
+                in_args[i]=conf[i]
+        try:
+            res = launch_spot_instances(r,k,s,options.max_price,ami,in_args)
+        except exc.EC2ResponseError as e:
+            print e
+    else:
+        for i in ONDEMAND_OPTIONS:
+            if i in conf and conf[i] is not None:
+                in_args[i]=conf[i]
+        try:
+            res = launch_instances(r,k,s,ami,in_args)
+        except exc.EC2ResponseError as e:
+            print e
+    
+if __name__ == "__main__":
+    main(sys.argv[:])
