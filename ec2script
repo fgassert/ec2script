@@ -195,7 +195,7 @@ def list_prices(r, k, s, d=1):
             outstats[k]["now"],
             stats[k]["pr"],
         )
-    print "Base prices, CPU, and memory based us-east-1 on-demand Linux instances as of Dec 2013."
+    print "Base prices, CPU, and memory based us-east-1 on-demand Linux instances as of July 2014."
     return h
     
 def list_ondemand():
@@ -211,7 +211,7 @@ def list_ondemand():
             stats[k]["ecu"],
             stats[k]["mem"],
             stats[k]["pr"])
-    print "Base prices, CPU, and memory based us-east-1 on-demand Linux instances as of Dec 2013. See most up to date prices at http://aws.amazon.com."
+    print "Base prices, CPU, and memory based us-east-1 on-demand Linux instances as of July 2014. See most up to date prices at http://aws.amazon.com."
 
 def load_config(cf):
     try:
