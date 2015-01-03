@@ -56,8 +56,8 @@ def send_email(username=None, password=None, server=None, subject='', body='', a
       print e
 
 def print_usage():
-   print 'Usage:\tsend_gmail.py -u <username> -p <password> [options]'
-   print '\tsend_gmail.py -h for help'
+   print 'Usage:\tsend_email.py -u <username> -p <password> [options]'
+   print '\tsend_email.py -h for help'
 
 def print_help():
    print_usage()
@@ -85,7 +85,7 @@ def main(argv):
          in_args[OPTIONS[opt]]=value
 
    # request hidden password if none provided
-   if 'password' not in in_args:
+   if 'username' in in_args and 'password' not in in_args:
       in_args['password']=getpass.getpass()
 
    # pass arg dict as function parameters
